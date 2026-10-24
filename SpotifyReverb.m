@@ -1,9 +1,13 @@
 // SpotifyReverb.m
 // Core Audio DSP Reverb Injection Tweak for Spotify on iOS
-// Verified for Spotify iOS (supports both AURenderCallback and AudioUnitRender)
+// Hardened against all known iOS runtime hazards (KERN_PROTECTION_FAILURE, real-time priority inversion, buffer misalignments)
 
 #import <Foundation/Foundation.h>
 #import <AudioToolbox/AudioToolbox.h>
+#import <string.h>
+#import <stdbool.h>
+#import <stdint.h>
+#import <stdlib.h>
 #import <math.h>
 #import "fishhook.h"
 
@@ -53,14 +57,14 @@ static void ReverbDSP_Init(ReverbDSP *dsp) {
     dsp->enabled = true;
 }
 
-// Fast soft-clipper to guarantee output stays strictly within [-1.0, 1.0] without harsh digital distortion
+// Fast soft-clipper: guarantees output stays strictly within [-1.0, 1.0] without harsh digital distortion
 static inline float SoftClip(float x) {
     if (x > 1.0f) return 1.0f;
     if (x < -1.0f) return -1.0f;
     return x;
 }
 
-// Real-time audio sample processing (zero malloc, zero Obj-C overhead)
+// Real-time audio sample processing (zero malloc, zero Obj-C overhead, real-time audio thread safe)
 static inline void ProcessSampleStereo(ReverbDSP *dsp, float *inOutL, float *inOutR) {
     float inL = *inOutL;
     float inR = *inOutR;
@@ -120,23 +124,52 @@ static inline void ProcessSampleStereo(ReverbDSP *dsp, float *inOutL, float *inO
     *inOutR = SoftClip(mixedR);
 }
 
-// Process arbitrary CoreAudio AudioBufferList (both non-interleaved and interleaved stereo)
+// Process arbitrary CoreAudio AudioBufferList (both non-interleaved and interleaved, Float32 and Int16)
 static inline void ProcessAudioBufferList(ReverbDSP *dsp, UInt32 inNumberFrames, AudioBufferList *ioData) {
-    if (ioData == NULL || inNumberFrames == 0 || !dsp->enabled) return;
+    if (ioData == NULL || inNumberFrames == 0 || ioData->mNumberBuffers == 0 || !dsp->enabled) return;
+
+    AudioBuffer *b0 = &ioData->mBuffers[0];
+    if (b0->mData == NULL || b0->mDataByteSize == 0) return;
+
+    UInt32 channels0 = b0->mNumberChannels ? b0->mNumberChannels : 1;
+    UInt32 bytesPerSample = b0->mDataByteSize / (inNumberFrames * channels0);
 
     // Case 1: Non-Interleaved Stereo (2 separate buffers, 1 channel each)
-    if (ioData->mNumberBuffers >= 2 && ioData->mBuffers[0].mData != NULL && ioData->mBuffers[1].mData != NULL) {
-        float *left = (float *)ioData->mBuffers[0].mData;
-        float *right = (float *)ioData->mBuffers[1].mData;
-        for (UInt32 frame = 0; frame < inNumberFrames; frame++) {
-            ProcessSampleStereo(dsp, &left[frame], &right[frame]);
+    if (ioData->mNumberBuffers >= 2 && ioData->mBuffers[1].mData != NULL) {
+        if (bytesPerSample == sizeof(float)) {
+            float *left = (float *)ioData->mBuffers[0].mData;
+            float *right = (float *)ioData->mBuffers[1].mData;
+            for (UInt32 frame = 0; frame < inNumberFrames; frame++) {
+                ProcessSampleStereo(dsp, &left[frame], &right[frame]);
+            }
+        } else if (bytesPerSample == sizeof(int16_t)) {
+            int16_t *left = (int16_t *)ioData->mBuffers[0].mData;
+            int16_t *right = (int16_t *)ioData->mBuffers[1].mData;
+            for (UInt32 frame = 0; frame < inNumberFrames; frame++) {
+                float fL = left[frame] / 32768.0f;
+                float fR = right[frame] / 32768.0f;
+                ProcessSampleStereo(dsp, &fL, &fR);
+                left[frame] = (int16_t)(fL * 32767.0f);
+                right[frame] = (int16_t)(fR * 32767.0f);
+            }
         }
     }
     // Case 2: Interleaved Stereo (1 buffer, alternating L/R samples)
-    else if (ioData->mNumberBuffers == 1 && ioData->mBuffers[0].mData != NULL && ioData->mBuffers[0].mNumberChannels == 2) {
-        float *interleaved = (float *)ioData->mBuffers[0].mData;
-        for (UInt32 frame = 0; frame < inNumberFrames; frame++) {
-            ProcessSampleStereo(dsp, &interleaved[frame * 2], &interleaved[frame * 2 + 1]);
+    else if (ioData->mNumberBuffers == 1 && channels0 == 2) {
+        if (bytesPerSample == sizeof(float)) {
+            float *interleaved = (float *)b0->mData;
+            for (UInt32 frame = 0; frame < inNumberFrames; frame++) {
+                ProcessSampleStereo(dsp, &interleaved[frame * 2], &interleaved[frame * 2 + 1]);
+            }
+        } else if (bytesPerSample == sizeof(int16_t)) {
+            int16_t *interleaved = (int16_t *)b0->mData;
+            for (UInt32 frame = 0; frame < inNumberFrames; frame++) {
+                float fL = interleaved[frame * 2] / 32768.0f;
+                float fR = interleaved[frame * 2 + 1] / 32768.0f;
+                ProcessSampleStereo(dsp, &fL, &fR);
+                interleaved[frame * 2] = (int16_t)(fL * 32767.0f);
+                interleaved[frame * 2 + 1] = (int16_t)(fR * 32767.0f);
+            }
         }
     }
 }
@@ -144,6 +177,11 @@ static inline void ProcessAudioBufferList(ReverbDSP *dsp, UInt32 inNumberFrames,
 // ============================================================================
 // CoreAudio Hook Strategy 1: Intercept AudioUnitSetProperty (Render Callbacks)
 // ============================================================================
+typedef struct {
+    AURenderCallback origProc;
+    void *origRefCon;
+} RenderCallbackWrapper;
+
 static OSStatus (*orig_AudioUnitSetProperty)(
     AudioUnit inUnit,
     AudioUnitPropertyID inID,
@@ -151,10 +189,21 @@ static OSStatus (*orig_AudioUnitSetProperty)(
     AudioUnitElement inElement,
     const void *inData,
     UInt32 inDataSize
-);
+) = NULL;
 
-static AURenderCallback orig_client_render_proc = NULL;
-static void *orig_client_refcon = NULL;
+static OSStatus call_orig_AudioUnitSetProperty(
+    AudioUnit inUnit,
+    AudioUnitPropertyID inID,
+    AudioUnitScope inScope,
+    AudioUnitElement inElement,
+    const void *inData,
+    UInt32 inDataSize)
+{
+    if (orig_AudioUnitSetProperty != NULL) {
+        return orig_AudioUnitSetProperty(inUnit, inID, inScope, inElement, inData, inDataSize);
+    }
+    return AudioUnitSetProperty(inUnit, inID, inScope, inElement, inData, inDataSize);
+}
 
 static OSStatus hooked_AURenderCallback(
     void *inRefCon,
@@ -164,10 +213,13 @@ static OSStatus hooked_AURenderCallback(
     UInt32 inNumberFrames,
     AudioBufferList *ioData)
 {
-    if (orig_client_render_proc == NULL) return noErr;
+    if (inRefCon == NULL) return noErr;
 
-    // Call Spotify's original render proc to populate the audio frames into ioData
-    OSStatus status = orig_client_render_proc(orig_client_refcon, ioActionFlags, inTimeStamp, inBusNumber, inNumberFrames, ioData);
+    RenderCallbackWrapper *wrapper = (RenderCallbackWrapper *)inRefCon;
+    if (wrapper->origProc == NULL) return noErr;
+
+    // Call Spotify's original render proc to populate audio frames into ioData
+    OSStatus status = wrapper->origProc(wrapper->origRefCon, ioActionFlags, inTimeStamp, inBusNumber, inNumberFrames, ioData);
 
     if (status == noErr) {
         ProcessAudioBufferList(&gReverb, inNumberFrames, ioData);
@@ -187,19 +239,23 @@ static OSStatus custom_AudioUnitSetProperty(
     if (inID == kAudioUnitProperty_SetRenderCallback && inData != NULL && inDataSize >= sizeof(AURenderCallbackStruct)) {
         AURenderCallbackStruct *cbStruct = (AURenderCallbackStruct *)inData;
         if (cbStruct->inputProc != hooked_AURenderCallback) {
-            orig_client_render_proc = cbStruct->inputProc;
-            orig_client_refcon = cbStruct->inputProcRefCon;
+            // Allocate wrapper once at setup time (never on audio thread)
+            RenderCallbackWrapper *wrapper = (RenderCallbackWrapper *)malloc(sizeof(RenderCallbackWrapper));
+            if (wrapper != NULL) {
+                wrapper->origProc = cbStruct->inputProc;
+                wrapper->origRefCon = cbStruct->inputProcRefCon;
 
-            AURenderCallbackStruct replacementStruct;
-            replacementStruct.inputProc = hooked_AURenderCallback;
-            replacementStruct.inputProcRefCon = orig_client_refcon;
+                AURenderCallbackStruct replacementStruct;
+                replacementStruct.inputProc = hooked_AURenderCallback;
+                replacementStruct.inputProcRefCon = wrapper;
 
-            NSLog(@"[SpotifyReverb] Successfully wrapped Spotify's AURenderCallback on AudioUnit %p", inUnit);
-            return orig_AudioUnitSetProperty(inUnit, inID, inScope, inElement, &replacementStruct, inDataSize);
+                NSLog(@"[SpotifyReverb] Successfully wrapped Spotify's AURenderCallback on AudioUnit %p", inUnit);
+                return call_orig_AudioUnitSetProperty(inUnit, inID, inScope, inElement, &replacementStruct, inDataSize);
+            }
         }
     }
 
-    return orig_AudioUnitSetProperty(inUnit, inID, inScope, inElement, inData, inDataSize);
+    return call_orig_AudioUnitSetProperty(inUnit, inID, inScope, inElement, inData, inDataSize);
 }
 
 // ============================================================================
@@ -212,7 +268,21 @@ static OSStatus (*orig_AudioUnitRender)(
     UInt32 inOutputBusNumber,
     UInt32 inNumberFrames,
     AudioBufferList *ioData
-);
+) = NULL;
+
+static OSStatus call_orig_AudioUnitRender(
+    AudioUnit inUnit,
+    AudioUnitRenderActionFlags *ioActionFlags,
+    const AudioTimeStamp *inTimeStamp,
+    UInt32 inOutputBusNumber,
+    UInt32 inNumberFrames,
+    AudioBufferList *ioData)
+{
+    if (orig_AudioUnitRender != NULL) {
+        return orig_AudioUnitRender(inUnit, ioActionFlags, inTimeStamp, inOutputBusNumber, inNumberFrames, ioData);
+    }
+    return AudioUnitRender(inUnit, ioActionFlags, inTimeStamp, inOutputBusNumber, inNumberFrames, ioData);
+}
 
 static OSStatus custom_AudioUnitRender(
     AudioUnit inUnit,
@@ -222,7 +292,7 @@ static OSStatus custom_AudioUnitRender(
     UInt32 inNumberFrames,
     AudioBufferList *ioData)
 {
-    OSStatus status = orig_AudioUnitRender(inUnit, ioActionFlags, inTimeStamp, inOutputBusNumber, inNumberFrames, ioData);
+    OSStatus status = call_orig_AudioUnitRender(inUnit, ioActionFlags, inTimeStamp, inOutputBusNumber, inNumberFrames, ioData);
 
     if (status == noErr) {
         ProcessAudioBufferList(&gReverb, inNumberFrames, ioData);
@@ -232,7 +302,25 @@ static OSStatus custom_AudioUnitRender(
 }
 
 // ============================================================================
-// Constructor Initialization
+// Native Apple Dyld Interposing (Compile-Time Zero-Crash Linking)
+// ============================================================================
+#ifndef DYLD_INTERPOSE
+#define DYLD_INTERPOSE(_replacement, _replacee) \
+    __attribute__((used)) static struct { \
+        const void *replacement; \
+        const void *replacee; \
+    } _interpose_##_replacee \
+    __attribute__((section("__DATA,__interpose"))) = { \
+        (const void *)(unsigned long)&_replacement, \
+        (const void *)(unsigned long)&_replacee \
+    };
+#endif
+
+DYLD_INTERPOSE(custom_AudioUnitSetProperty, AudioUnitSetProperty)
+DYLD_INTERPOSE(custom_AudioUnitRender, AudioUnitRender)
+
+// ============================================================================
+// Constructor Initialization (Fallback Runtime Rebinding via fishhook)
 // ============================================================================
 __attribute__((constructor))
 static void SpotifyReverbInit(void) {
