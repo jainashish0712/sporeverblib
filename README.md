@@ -1,53 +1,45 @@
-# SpotifyReverb - iOS Reverb DSP Tweak
+# SpotifyReverb
 
-A native CoreAudio DSP Reverb injection tweak for Spotify on iOS.
+An ultra-low latency, studio-quality Core Audio DSP Reverb tweak for Spotify on iOS, complete with an on-screen interactive control HUD.
 
-## How It Works
-- Intercepts Apple's Core Audio `AudioUnitRender` pipeline dynamically using Meta's `fishhook`.
-- Directly filters stereo PCM audio streams (`ioData->mBuffers`) using an algorithmic Schroeder-Moorer / Freeverb DSP engine (4 parallel comb filters + 2 series allpass diffusion stages).
-- Operates on real-time audio threads with zero memory allocation (`malloc`/`free`) for 100% stutter-free playback and zero CPU overhead.
+## Features
+- **Pizzicato / Freeverb DSP Architecture:** 4 parallel low-pass feedback comb filters tuned with prime delay lines + 2 cascaded allpass diffusion stages.
+- **Floating Interactive HUD (Option A):**
+  - **Floating Pill Button (`🎛️`):** Sits unobtrusively on screen above the player bar. Fully draggable anywhere on the screen (with automatic boundary and notch/safe-area clamping).
+  - **Frosted Dark Glass Control Panel:** High-resolution blur card with Spotify Green `#1DB954` accents.
+  - **Enable / Disable Toggle:** Instant bypass switch.
+  - **Wet / Dry Mix Slider:** 0% to 100% wet mix with live percentage readout.
+  - **Room Size Slider:** 0.1 to 0.98 feedback gain control (decay duration).
+  - **Damping Slider:** 0.0 to 1.0 high-frequency absorption filter.
+  - **Reset to Studio Defaults:** One-tap restoration of optimal listening acoustics.
+  - **Two-Finger Double-Tap Shortcut:** Double-tapping anywhere on the screen with two fingers toggles the HUD open or closed.
+- **Audio Thread Safety:**
+  - Zero memory allocations (`malloc`), zero locks, and zero Objective-C message sends on the real-time audio thread.
+  - Real-time parameter smoothing (`target` interpolation) eliminates zipper clicks and audio popping when dragging sliders.
+  - Fast soft-clipping limiter prevents harsh digital distortion.
+- **Hardened Symbol Hooking:**
+  - Dual hook strategy: Intercepts both `AudioUnitSetProperty` (`kAudioUnitProperty_SetRenderCallback`) and `AudioUnitRender`.
+  - Supports modern compile-time `DYLD_INTERPOSE` alongside runtime `fishhook` with `vm_protect` memory page protection to safely patch iOS `__DATA_CONST` segments without `KERN_PROTECTION_FAILURE`.
 
-## Building `SpotifyReverb.dylib`
+## Project Structure
+- `SpotifyReverb.h`: Public C interface for thread-safe reverb DSP parameter controls.
+- `SpotifyReverb.m`: Core Audio DSP engine, callback wrappers, and symbol interposing.
+- `SpotifyReverbUI.h`: UIKit HUD controller interface.
+- `SpotifyReverbUI.m`: Floating draggable button, modal HUD panel, sliders, and gestures.
+- `fishhook.h` & `fishhook.c`: Mach-O symbol rebinding engine patched for modern iOS memory protection.
+- `Makefile`: Theos tweak build specification.
+- `build.sh`: Direct compilation script using Apple's `clang`.
+- `.github/workflows/build.yml`: Automated GitHub Actions build workflow to generate `SpotifyReverb.dylib` on macOS runners.
 
-### Option 1: GitHub Actions (Easiest - No Mac Needed)
-1. Push this folder to a GitHub repository.
-2. Go to the **Actions** tab on GitHub.
-3. Download the compiled `SpotifyReverb.dylib` artifact directly from the completed run.
+## How to Build
+### Option 1: GitHub Actions (No Local Mac Required)
+Push to GitHub; the pre-configured workflow compiles the tweak on Apple's macOS runner and uploads `SpotifyReverb.dylib` under Artifacts.
 
-### Option 2: Local Mac / Xcode
-Run:
+### Option 2: Local Mac / Theos
 ```bash
-chmod +x build.sh
+# Using build.sh
 ./build.sh
-```
 
-### Option 3: Theos
-Run:
-```bash
+# Or using Theos
 make package
-```
-
-## How to Inject into `Spotify.app`
-
-### Method A: LiveContainer (No-Jailbreak)
-1. Place `SpotifyReverb.dylib` into:
-   `LiveContainer/Documents/Tweaks/spotify/SpotifyReverb.dylib`
-2. Enable tweak injection for Spotify in LiveContainer.
-3. Open Spotify. The reverb DSP will activate automatically on audio playback.
-
-### Method B: Sideloadly / SideStore / AltStore
-1. In Sideloadly or your sideloading tool, select your decrypted Spotify IPA.
-2. In the **Advanced Options / Tweak Injection** section, select `SpotifyReverb.dylib`.
-3. Sign and install the IPA to your iPhone/iPad.
-
-### Method C: Direct Mach-O Injection with `optool`
-```bash
-# 1. Copy the dylib into the Frameworks directory
-cp SpotifyReverb.dylib Payload/Spotify.app/Frameworks/
-
-# 2. Inject the LC_LOAD_DYLIB command into Spotify's Mach-O binary
-optool install -c load -p "@rpath/SpotifyReverb.dylib" -t Payload/Spotify.app/Spotify
-
-# 3. Re-zip into an IPA
-zip -qry Spotify-Reverb.ipa Payload
 ```

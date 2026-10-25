@@ -9,6 +9,7 @@
 #import <stdint.h>
 #import <stdlib.h>
 #import <math.h>
+#import "SpotifyReverb.h"
 #import "fishhook.h"
 
 #define NUM_COMB_FILTERS 4
@@ -38,11 +39,18 @@ typedef struct {
     int allpassIndicesL[NUM_ALLPASS_FILTERS];
     int allpassIndicesR[NUM_ALLPASS_FILTERS];
 
-    // Reverb DSP parameters
-    float roomSize;    // Feedback gain (decay length, default 0.82)
-    float damping;     // High frequency absorption (default 0.25)
-    float wet;         // Wet level (default 0.35)
-    float dry;         // Dry level (default 0.65)
+    // Reverb DSP parameters (current interpolated state)
+    float roomSize;
+    float damping;
+    float wet;
+    float dry;
+
+    // Target parameters (updated by UI sliders, smoothly interpolated to eliminate zipper noise)
+    float targetRoomSize;
+    float targetDamping;
+    float targetWet;
+    float targetDry;
+
     bool enabled;
 } ReverbDSP;
 
@@ -54,6 +62,10 @@ static void ReverbDSP_Init(ReverbDSP *dsp) {
     dsp->damping = 0.25f;
     dsp->wet = 0.35f;
     dsp->dry = 0.65f;
+    dsp->targetRoomSize = 0.82f;
+    dsp->targetDamping = 0.25f;
+    dsp->targetWet = 0.35f;
+    dsp->targetDry = 0.65f;
     dsp->enabled = true;
 }
 
@@ -131,6 +143,12 @@ static inline void ProcessAudioBufferList(ReverbDSP *dsp, UInt32 inNumberFrames,
     AudioBuffer *b0 = &ioData->mBuffers[0];
     if (b0->mData == NULL || b0->mDataByteSize == 0) return;
 
+    // Silky smooth parameter interpolation per buffer block (eliminates audio zipper noise during slider drags)
+    dsp->roomSize += 0.05f * (dsp->targetRoomSize - dsp->roomSize);
+    dsp->damping  += 0.05f * (dsp->targetDamping  - dsp->damping);
+    dsp->wet      += 0.05f * (dsp->targetWet      - dsp->wet);
+    dsp->dry      += 0.05f * (dsp->targetDry      - dsp->dry);
+
     UInt32 channels0 = b0->mNumberChannels ? b0->mNumberChannels : 1;
     UInt32 bytesPerSample = b0->mDataByteSize / (inNumberFrames * channels0);
 
@@ -172,6 +190,61 @@ static inline void ProcessAudioBufferList(ReverbDSP *dsp, UInt32 inNumberFrames,
             }
         }
     }
+}
+
+// ============================================================================
+// Public Parameter Getters & Setters
+// ============================================================================
+void SpotifyReverb_SetEnabled(bool enabled) {
+    gReverb.enabled = enabled;
+}
+
+bool SpotifyReverb_IsEnabled(void) {
+    return gReverb.enabled;
+}
+
+void SpotifyReverb_SetWetDry(float wet, float dry) {
+    if (wet < 0.0f) wet = 0.0f;
+    if (wet > 1.0f) wet = 1.0f;
+    if (dry < 0.0f) dry = 0.0f;
+    if (dry > 1.0f) dry = 1.0f;
+    gReverb.targetWet = wet;
+    gReverb.targetDry = dry;
+}
+
+float SpotifyReverb_GetWet(void) {
+    return gReverb.targetWet;
+}
+
+float SpotifyReverb_GetDry(void) {
+    return gReverb.targetDry;
+}
+
+void SpotifyReverb_SetRoomSize(float roomSize) {
+    if (roomSize < 0.0f) roomSize = 0.0f;
+    if (roomSize > 0.98f) roomSize = 0.98f; // Clamp to prevent infinite oscillation
+    gReverb.targetRoomSize = roomSize;
+}
+
+float SpotifyReverb_GetRoomSize(void) {
+    return gReverb.targetRoomSize;
+}
+
+void SpotifyReverb_SetDamping(float damping) {
+    if (damping < 0.0f) damping = 0.0f;
+    if (damping > 1.0f) damping = 1.0f;
+    gReverb.targetDamping = damping;
+}
+
+float SpotifyReverb_GetDamping(void) {
+    return gReverb.targetDamping;
+}
+
+void SpotifyReverb_ResetDefaults(void) {
+    SpotifyReverb_SetRoomSize(0.82f);
+    SpotifyReverb_SetDamping(0.25f);
+    SpotifyReverb_SetWetDry(0.35f, 0.65f);
+    SpotifyReverb_SetEnabled(true);
 }
 
 // ============================================================================
