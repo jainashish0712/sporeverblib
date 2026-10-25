@@ -3,6 +3,8 @@
 // Thread-safe, main-thread guaranteed, zero private APIs
 
 #import <UIKit/UIKit.h>
+#import <CoreGraphics/CoreGraphics.h>
+#import <QuartzCore/QuartzCore.h>
 #import "SpotifyReverbUI.h"
 #import "SpotifyReverb.h"
 
@@ -81,7 +83,7 @@
         center.y = MAX(minY, MIN(maxY, center.y));
 
         self.center = center;
-        [pan setTranslation:CGPointZero inView:superview];
+        [pan setTranslation:CGPointMake(0, 0) inView:superview];
     }
 }
 
