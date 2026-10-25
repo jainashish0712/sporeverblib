@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Comprehensive Syntax & Type Verification Suite for SpotifyReverb
+Comprehensive Syntax & Type Verification Suite for SpotifyReverb & Pitch
 Validates:
   - fishhook.h, fishhook.c
-  - SpotifyReverb.h, SpotifyReverb.m (Core Audio DSP + parameter API)
-  - SpotifyReverbUI.h, SpotifyReverbUI.m (UIKit Floating HUD & Gestures)
+  - SpotifyReverb.h, SpotifyReverb.m (Core Audio DSP + Pitch & Reverb parameter API)
+  - SpotifyReverbUI.h, SpotifyReverbUI.m (UIKit Floating HUD & Pitch Slider)
 """
 
 import sys
@@ -78,13 +78,21 @@ def test_cffi_declarations():
         int allpassIndicesL[2];
         int allpassIndicesR[2];
 
+        float pitchBufL[4096];
+        float pitchBufR[4096];
+        int pitchWriteIdx;
+        float pitchPhase;
+
+        float semitones;
+        float targetSemitones;
+        float pitchRatio;
+
         float roomSize;
         float damping;
         float wet;
         float dry;
 
         float targetRoomSize;
-        float targetDamping;
         float targetWet;
         float targetDry;
 
@@ -98,16 +106,16 @@ def test_cffi_declarations():
 
     int rebind_symbols(struct rebinding rebindings[], size_t rebindings_nel);
 
-    // Public Reverb Control API
+    // Public Reverb & Pitch Control API
     void SpotifyReverb_SetEnabled(int enabled);
     int SpotifyReverb_IsEnabled(void);
+    void SpotifyReverb_SetPitch(float semitones);
+    float SpotifyReverb_GetPitch(void);
     void SpotifyReverb_SetWetDry(float wet, float dry);
     float SpotifyReverb_GetWet(void);
     float SpotifyReverb_GetDry(void);
     void SpotifyReverb_SetRoomSize(float roomSize);
     float SpotifyReverb_GetRoomSize(void);
-    void SpotifyReverb_SetDamping(float damping);
-    float SpotifyReverb_GetDamping(void);
     void SpotifyReverb_ResetDefaults(void);
     """
     ffi.cdef(c_decl)
@@ -185,13 +193,21 @@ def test_pycparser_ast():
         int allpassIndicesL[2];
         int allpassIndicesR[2];
 
+        float pitchBufL[4096];
+        float pitchBufR[4096];
+        int pitchWriteIdx;
+        float pitchPhase;
+
+        float semitones;
+        float targetSemitones;
+        float pitchRatio;
+
         float roomSize;
         float damping;
         float wet;
         float dry;
 
         float targetRoomSize;
-        float targetDamping;
         float targetWet;
         float targetDry;
 
@@ -209,53 +225,42 @@ def test_pycparser_ast():
         return x;
     }
 
-    static void ProcessSampleStereo(ReverbDSP *dsp, float *inOutL, float *inOutR) {
-        float inL = *inOutL;
-        float inR = *inOutR;
-        float monoIn = 0.5f * (inL + inR);
-        float outL = 0.0f;
-        float outR = 0.0f;
-        int i;
+    static void ProcessPitchStereo(ReverbDSP *dsp, float *ioL, float *ioR) {
+        int wIdx = dsp->pitchWriteIdx;
+        float phase = dsp->pitchPhase;
+        float grainSize = 2048.0f;
+        float p1;
+        float w1;
+        float d1;
+        float r1;
+        int i1;
+        int next1;
+        float f1;
+        float s1L;
+        float s1R;
 
-        for (i = 0; i < 4; i++) {
-            int lenL = kCombLengthsL[i];
-            int idxL = dsp->combIndicesL[i];
-            float bufOutL = dsp->combBuffersL[i][idxL];
-            dsp->combFilterStoreL[i] = (bufOutL * (1.0f - dsp->damping)) + (dsp->combFilterStoreL[i] * dsp->damping);
-            dsp->combBuffersL[i][idxL] = monoIn + (dsp->combFilterStoreL[i] * dsp->roomSize);
-            dsp->combIndicesL[i] = (idxL + 1) % lenL;
-            outL += bufOutL;
+        dsp->pitchBufL[wIdx] = *ioL;
+        dsp->pitchBufR[wIdx] = *ioR;
 
-            int lenR = kCombLengthsR[i];
-            int idxR = dsp->combIndicesR[i];
-            float bufOutR = dsp->combBuffersR[i][idxR];
-            dsp->combFilterStoreR[i] = (bufOutR * (1.0f - dsp->damping)) + (dsp->combFilterStoreR[i] * dsp->damping);
-            dsp->combBuffersR[i][idxR] = monoIn + (dsp->combFilterStoreR[i] * dsp->roomSize);
-            dsp->combIndicesR[i] = (idxR + 1) % lenR;
-            outR += bufOutR;
+        if (dsp->semitones == 0.0f) {
+            dsp->pitchWriteIdx = (wIdx + 1) % 4096;
+            return;
         }
 
-        outL *= 0.25f;
-        outR *= 0.25f;
+        p1 = phase;
+        w1 = 0.5f;
+        d1 = p1 * grainSize;
+        r1 = (float)wIdx - d1;
+        if (r1 < 0.0f) r1 += 4096.0f;
+        i1 = (int)r1;
+        next1 = (i1 + 1) % 4096;
+        f1 = r1 - (float)i1;
+        s1L = (1.0f - f1) * dsp->pitchBufL[i1] + f1 * dsp->pitchBufL[next1];
+        s1R = (1.0f - f1) * dsp->pitchBufR[i1] + f1 * dsp->pitchBufR[next1];
 
-        for (i = 0; i < 2; i++) {
-            int lenL = kAllpassLengthsL[i];
-            int idxL = dsp->allpassIndicesL[i];
-            float bufOutL = dsp->allpassBuffersL[i][idxL];
-            dsp->allpassBuffersL[i][idxL] = outL + (bufOutL * 0.5f);
-            outL = -outL + bufOutL;
-            dsp->allpassIndicesL[i] = (idxL + 1) % lenL;
-
-            int lenR = kAllpassLengthsR[i];
-            int idxR = dsp->allpassIndicesR[i];
-            float bufOutR = dsp->allpassBuffersR[i][idxR];
-            dsp->allpassBuffersR[i][idxR] = outR + (bufOutR * 0.5f);
-            outR = -outR + bufOutR;
-            dsp->allpassIndicesR[i] = (idxR + 1) % lenR;
-        }
-
-        *inOutL = SoftClip((inL * dsp->dry) + (outL * dsp->wet));
-        *inOutR = SoftClip((inR * dsp->dry) + (outR * dsp->wet));
+        *ioL = s1L;
+        *ioR = s1R;
+        dsp->pitchWriteIdx = (wIdx + 1) % 4096;
     }
 
     static void ProcessAudioBufferList(ReverbDSP *dsp, UInt32 inNumberFrames, AudioBufferList *ioData) {
@@ -270,7 +275,6 @@ def test_pycparser_ast():
         if (b0->mData == 0 || b0->mDataByteSize == 0) return;
 
         dsp->roomSize += 0.05f * (dsp->targetRoomSize - dsp->roomSize);
-        dsp->damping  += 0.05f * (dsp->targetDamping  - dsp->damping);
         dsp->wet      += 0.05f * (dsp->targetWet      - dsp->wet);
         dsp->dry      += 0.05f * (dsp->targetDry      - dsp->dry);
 
@@ -282,33 +286,7 @@ def test_pycparser_ast():
                 float *left = (float *)ioData->mBuffers[0].mData;
                 float *right = (float *)ioData->mBuffers[1].mData;
                 for (i = 0; i < inNumberFrames; i++) {
-                    ProcessSampleStereo(dsp, &left[i], &right[i]);
-                }
-            } else if (bytesPerSample == sizeof(int16_t)) {
-                int16_t *left = (int16_t *)ioData->mBuffers[0].mData;
-                int16_t *right = (int16_t *)ioData->mBuffers[1].mData;
-                for (i = 0; i < inNumberFrames; i++) {
-                    float fL = left[i] / 32768.0f;
-                    float fR = right[i] / 32768.0f;
-                    ProcessSampleStereo(dsp, &fL, &fR);
-                    left[i] = (int16_t)(fL * 32767.0f);
-                    right[i] = (int16_t)(fR * 32767.0f);
-                }
-            }
-        } else if (ioData->mNumberBuffers == 1 && channels0 == 2) {
-            if (bytesPerSample == sizeof(float)) {
-                float *interleaved = (float *)b0->mData;
-                for (i = 0; i < inNumberFrames; i++) {
-                    ProcessSampleStereo(dsp, &interleaved[i * 2], &interleaved[i * 2 + 1]);
-                }
-            } else if (bytesPerSample == sizeof(int16_t)) {
-                int16_t *interleaved = (int16_t *)b0->mData;
-                for (i = 0; i < inNumberFrames; i++) {
-                    float fL = interleaved[i * 2] / 32768.0f;
-                    float fR = interleaved[i * 2 + 1] / 32768.0f;
-                    ProcessSampleStereo(dsp, &fL, &fR);
-                    interleaved[i * 2] = (int16_t)(fL * 32767.0f);
-                    interleaved[i * 2 + 1] = (int16_t)(fR * 32767.0f);
+                    ProcessPitchStereo(dsp, &left[i], &right[i]);
                 }
             }
         }
@@ -348,21 +326,26 @@ def test_objective_c_syntax():
         "handlePan:",
         "handleTap:",
         "enableToggled:",
+        "pitchChanged:",
         "mixChanged:",
         "roomChanged:",
-        "dampingChanged:",
         "resetTapped",
         "closeTapped",
         "SpotifyReverb_SetEnabled",
+        "SpotifyReverb_SetPitch",
+        "SpotifyReverb_GetPitch",
         "SpotifyReverb_SetWetDry",
         "SpotifyReverb_SetRoomSize",
-        "SpotifyReverb_SetDamping",
         "SpotifyReverb_ResetDefaults"
     ]
     for sym in required_symbols:
         assert sym in ui_code, f"Missing required symbol in SpotifyReverbUI.m: {sym}"
 
-    print("   -> PASS: Objective-C bracket parity and symbol structure 100% valid.\n")
+    # Verify damping was removed from UI
+    assert "dampingSlider" not in ui_code, "dampingSlider must be removed from UI!"
+    assert "dampingChanged" not in ui_code, "dampingChanged must be removed from UI!"
+
+    print("   -> PASS: Objective-C bracket parity and symbol structure 100% valid (damping removed, pitch slider active).\n")
 
 def test_file_integrity():
     print("[4/4] Validating header inclusions and cross-file consistency...")
@@ -382,21 +365,22 @@ def test_file_integrity():
 
     # Header guards and declarations
     assert "#ifndef SpotifyReverb_h" in h_dsp
-    assert "SpotifyReverb_SetEnabled" in h_dsp
+    assert "SpotifyReverb_SetPitch" in h_dsp
+    assert "SpotifyReverb_GetPitch" in h_dsp
     assert "SpotifyReverbUI.h" in h_ui
     assert "SpotifyReverbHUDManager" in h_ui
 
     # Makefile & build.sh frameworks
-    assert "SpotifyReverbUI.m" in mk
-    assert "UIKit" in mk
-    assert "SpotifyReverbUI.m" in bsh
-    assert "-framework UIKit" in bsh
+    assert "CoreGraphics" in mk
+    assert "QuartzCore" in mk
+    assert "-framework CoreGraphics" in bsh
+    assert "-framework QuartzCore" in bsh
 
     print("   -> PASS: All headers, build files, and implementations are fully synchronized.\n")
 
 if __name__ == "__main__":
     print("==================================================================")
-    print("          C / OBJECTIVE-C SYNTAX AUDIT & VERIFICATION            ")
+    print("      C / OBJECTIVE-C SYNTAX AUDIT & PITCH SLIDER VERIFICATION     ")
     print("==================================================================")
     test_cffi_declarations()
     test_pycparser_ast()

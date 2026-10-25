@@ -1,5 +1,5 @@
 // SpotifyReverbUI.m
-// Clean, Floating Draggable HUD & Control Overlay for SpotifyReverb
+// Clean, Floating Draggable HUD & Control Overlay for SpotifyReverb & Pitch
 // Thread-safe, main-thread guaranteed, zero private APIs
 
 #import <UIKit/UIKit.h>
@@ -90,18 +90,18 @@
 @end
 
 // ============================================================================
-// Modal Reverb HUD Control View
+// Modal Reverb & Pitch HUD Control View
 // ============================================================================
 @interface SpotifyReverbHUDView : UIView
 
 @property (nonatomic, strong) UIVisualEffectView *blurView;
 @property (nonatomic, strong) UISwitch *enableSwitch;
+@property (nonatomic, strong) UISlider *pitchSlider;
+@property (nonatomic, strong) UILabel *pitchLabel;
 @property (nonatomic, strong) UISlider *mixSlider;
 @property (nonatomic, strong) UILabel *mixLabel;
 @property (nonatomic, strong) UISlider *roomSlider;
 @property (nonatomic, strong) UILabel *roomLabel;
-@property (nonatomic, strong) UISlider *dampingSlider;
-@property (nonatomic, strong) UILabel *dampingLabel;
 @property (nonatomic, copy) void (^closeHandler)(void);
 
 - (void)refreshValues;
@@ -131,7 +131,7 @@
 
         // Title Header
         UILabel *titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad, y, w - 40.0f, 26.0f)];
-        titleLabel.text = @"Reverb DSP Controls";
+        titleLabel.text = @"Reverb & Pitch DSP";
         titleLabel.font = [UIFont boldSystemFontOfSize:17.0f];
         titleLabel.textColor = [UIColor whiteColor];
         [contentView addSubview:titleLabel];
@@ -149,7 +149,7 @@
 
         // Enable Switch Row
         UILabel *enableText = [[UILabel alloc] initWithFrame:CGRectMake(pad, y + 4.0f, w - 60.0f, 24.0f)];
-        enableText.text = @"Enable Reverb";
+        enableText.text = @"Enable DSP Effects";
         enableText.font = [UIFont systemFontOfSize:15.0f weight:UIFontWeightMedium];
         enableText.textColor = [UIColor whiteColor];
         [contentView addSubview:enableText];
@@ -167,6 +167,23 @@
         [contentView addSubview:sep];
 
         y += 12.0f;
+
+        // Pitch Shift Slider (-4.0 to +4.0 semitones in 0.2 intervals, tempo invariant)
+        _pitchLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad, y, w, 18.0f)];
+        _pitchLabel.font = [UIFont systemFontOfSize:13.0f weight:UIFontWeightRegular];
+        _pitchLabel.textColor = [UIColor colorWithWhite:0.85f alpha:1.0f];
+        [contentView addSubview:_pitchLabel];
+
+        y += 22.0f;
+        _pitchSlider = [[UISlider alloc] initWithFrame:CGRectMake(pad, y, w, 30.0f)];
+        _pitchSlider.minimumValue = -4.0f;
+        _pitchSlider.maximumValue = 4.0f;
+        _pitchSlider.value = 0.0f;
+        _pitchSlider.minimumTrackTintColor = SPOTIFY_GREEN;
+        [_pitchSlider addTarget:self action:@selector(pitchChanged:) forControlEvents:UIControlEventValueChanged];
+        [contentView addSubview:_pitchSlider];
+
+        y += 38.0f;
 
         // Wet/Dry Mix Slider
         _mixLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad, y, w, 18.0f)];
@@ -198,22 +215,6 @@
         [_roomSlider addTarget:self action:@selector(roomChanged:) forControlEvents:UIControlEventValueChanged];
         [contentView addSubview:_roomSlider];
 
-        y += 38.0f;
-
-        // Damping Slider
-        _dampingLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad, y, w, 18.0f)];
-        _dampingLabel.font = [UIFont systemFontOfSize:13.0f weight:UIFontWeightRegular];
-        _dampingLabel.textColor = [UIColor colorWithWhite:0.85f alpha:1.0f];
-        [contentView addSubview:_dampingLabel];
-
-        y += 22.0f;
-        _dampingSlider = [[UISlider alloc] initWithFrame:CGRectMake(pad, y, w, 30.0f)];
-        _dampingSlider.minimumValue = 0.0f;
-        _dampingSlider.maximumValue = 1.0f;
-        _dampingSlider.minimumTrackTintColor = SPOTIFY_GREEN;
-        [_dampingSlider addTarget:self action:@selector(dampingChanged:) forControlEvents:UIControlEventValueChanged];
-        [contentView addSubview:_dampingSlider];
-
         y += 42.0f;
 
         // Reset Defaults Button
@@ -235,39 +236,53 @@
 - (void)refreshValues {
     self.enableSwitch.on = SpotifyReverb_IsEnabled();
 
+    // Pitch (-4.0 to +4.0 in 0.2 intervals)
+    float pitch = SpotifyReverb_GetPitch();
+    self.pitchSlider.value = pitch;
+    if (fabsf(pitch) < 0.01f) {
+        self.pitchLabel.text = @"Pitch: 0.0 st (Original)";
+    } else {
+        self.pitchLabel.text = [NSString stringWithFormat:@"Pitch: %+0.1f st", pitch];
+    }
+
+    // Wet / Dry
     float wet = SpotifyReverb_GetWet();
     float dry = SpotifyReverb_GetDry();
     self.mixSlider.value = wet;
-    self.mixLabel.text = [NSString stringWithFormat:@"Mix: Dry %.0f%% / Wet %.0f%%", dry * 100.0f, wet * 100.0f];
+    self.mixLabel.text = [NSString stringWithFormat:@"Reverb Mix: Dry %.0f%% / Wet %.0f%%", dry * 100.0f, wet * 100.0f];
 
+    // Room Size
     float room = SpotifyReverb_GetRoomSize();
     self.roomSlider.value = room;
     self.roomLabel.text = [NSString stringWithFormat:@"Room Size (Decay): %.2f", room];
-
-    float damp = SpotifyReverb_GetDamping();
-    self.dampingSlider.value = damp;
-    self.dampingLabel.text = [NSString stringWithFormat:@"Damping (Tone): %.2f", damp];
 }
 
 - (void)enableToggled:(UISwitch *)sender {
     SpotifyReverb_SetEnabled(sender.on);
 }
 
+- (void)pitchChanged:(UISlider *)sender {
+    float step = 0.2f;
+    float val = roundf(sender.value / step) * step;
+    sender.value = val;
+    SpotifyReverb_SetPitch(val);
+    if (fabsf(val) < 0.01f) {
+        self.pitchLabel.text = @"Pitch: 0.0 st (Original)";
+    } else {
+        self.pitchLabel.text = [NSString stringWithFormat:@"Pitch: %+0.1f st", val];
+    }
+}
+
 - (void)mixChanged:(UISlider *)sender {
     float wet = sender.value;
     float dry = 1.0f - (wet * 0.5f);
     SpotifyReverb_SetWetDry(wet, dry);
-    self.mixLabel.text = [NSString stringWithFormat:@"Mix: Dry %.0f%% / Wet %.0f%%", dry * 100.0f, wet * 100.0f];
+    self.mixLabel.text = [NSString stringWithFormat:@"Reverb Mix: Dry %.0f%% / Wet %.0f%%", dry * 100.0f, wet * 100.0f];
 }
 
 - (void)roomChanged:(UISlider *)sender {
     SpotifyReverb_SetRoomSize(sender.value);
     self.roomLabel.text = [NSString stringWithFormat:@"Room Size (Decay): %.2f", sender.value];
-}
-
-- (void)dampingChanged:(UISlider *)sender {
-    SpotifyReverb_SetDamping(sender.value);
-    self.dampingLabel.text = [NSString stringWithFormat:@"Damping (Tone): %.2f", sender.value];
 }
 
 - (void)resetTapped {

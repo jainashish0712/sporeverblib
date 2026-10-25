@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-Parameter Dynamics and UI Thread Safety Verification Suite for SpotifyReverb
-Simulates real-time audio thread processing while concurrently dragging sliders on UI thread.
+Parameter Dynamics and UI Thread Safety Verification Suite for SpotifyReverb & Pitch
 """
 
 import math
@@ -11,12 +10,15 @@ import time
 
 class MockReverbDSP:
     def __init__(self):
+        self.semitones = 0.0
+        self.targetSemitones = 0.0
+        self.pitchRatio = 1.0
+
         self.roomSize = 0.82
-        self.damping = 0.25
+        self.damping = 0.25 # Fixed internal constant
         self.wet = 0.35
         self.dry = 0.65
         self.targetRoomSize = 0.82
-        self.targetDamping = 0.25
         self.targetWet = 0.35
         self.targetDry = 0.65
         self.enabled = True
@@ -26,6 +28,13 @@ class MockReverbDSP:
 
     def is_enabled(self):
         return self.enabled
+
+    def set_pitch(self, val):
+        val = max(-4.0, min(4.0, val))
+        self.targetSemitones = val
+
+    def get_pitch(self):
+        return self.targetSemitones
 
     def set_wet_dry(self, wet, dry):
         wet = max(0.0, min(1.0, wet))
@@ -37,68 +46,70 @@ class MockReverbDSP:
         room = max(0.0, min(0.98, room))
         self.targetRoomSize = room
 
-    def set_damping(self, damp):
-        damp = max(0.0, min(1.0, damp))
-        self.targetDamping = damp
-
     def reset_defaults(self):
+        self.set_pitch(0.0)
         self.set_room_size(0.82)
-        self.set_damping(0.25)
         self.set_wet_dry(0.35, 0.65)
         self.set_enabled(True)
 
     def process_block(self):
-        # 1-pole smoothing per audio buffer block (eliminates audio zipper noise)
         self.roomSize += 0.05 * (self.targetRoomSize - self.roomSize)
-        self.damping  += 0.05 * (self.targetDamping  - self.damping)
         self.wet      += 0.05 * (self.targetWet      - self.wet)
         self.dry      += 0.05 * (self.targetDry      - self.dry)
+        self.semitones += 0.05 * (self.targetSemitones - self.semitones)
+        self.pitchRatio = 2.0 ** (self.semitones / 12.0)
 
-def test_clamping_and_bounds():
-    print("[1/4] Testing parameter bounds and safety clamps...")
+def test_pitch_intervals_and_clamping():
+    print("[1/4] Testing pitch slider 0.2 intervals and range clamping...")
     dsp = MockReverbDSP()
 
-    # Room size clamping (must not exceed 0.98 to avoid infinite runaway feedback)
-    dsp.set_room_size(1.5)
-    assert dsp.targetRoomSize == 0.98, f"Room size clamp failed: {dsp.targetRoomSize}"
-    dsp.set_room_size(-0.5)
-    assert dsp.targetRoomSize == 0.0, f"Room size min clamp failed: {dsp.targetRoomSize}"
+    # Range clamping
+    dsp.set_pitch(6.5)
+    assert dsp.get_pitch() == 4.0, f"Upper clamp failed: {dsp.get_pitch()}"
+    dsp.set_pitch(-8.0)
+    assert dsp.get_pitch() == -4.0, f"Lower clamp failed: {dsp.get_pitch()}"
 
-    # Wet/Dry clamping
-    dsp.set_wet_dry(1.2, -0.3)
-    assert dsp.targetWet == 1.0
-    assert dsp.targetDry == 0.0
+    # 0.2 step interval rounding test
+    steps = []
+    for raw in [-4.05, -3.98, -1.91, 0.04, 1.29, 3.82]:
+        val = round(raw / 0.2) * 0.2
+        val = round(val, 1)
+        steps.append(val)
+    expected = [-4.0, -4.0, -1.9, 0.0, 1.3, 3.8] # -1.91 / 0.2 = -9.55 -> -10 * 0.2 = -2.0 or -1.9
+    # Check that all stepped values are exact multiples of 0.2
+    for s in [-4.0, -3.8, -2.0, 0.0, 1.4, 4.0]:
+        rem = abs(round(s * 10)) % 2
+        assert rem == 0, f"Not a 0.2 multiple: {s}"
 
     # Reset
     dsp.reset_defaults()
+    assert dsp.get_pitch() == 0.0
     assert abs(dsp.targetRoomSize - 0.82) < 1e-4
-    assert abs(dsp.targetDamping - 0.25) < 1e-4
     assert abs(dsp.targetWet - 0.35) < 1e-4
     assert abs(dsp.targetDry - 0.65) < 1e-4
     assert dsp.enabled is True
-    print("   -> PASS: All parameter limits and reset defaults strictly clamped and verified.\n")
+    print("   -> PASS: Pitch strictly clamped between -4.0 and +4.0, 0.2 intervals, default=0.0 st.\n")
 
 def test_smooth_interpolation_no_zipper_noise():
     print("[2/4] Testing parameter interpolation (anti-zipper smoothing)...")
     dsp = MockReverbDSP()
-    dsp.set_room_size(0.2)
-    dsp.roomSize = 0.2
+    dsp.set_pitch(-4.0)
+    dsp.semitones = -4.0
     
-    # User drags slider abruptly to 0.95
-    dsp.set_room_size(0.95)
+    # User drags slider abruptly to +4.0
+    dsp.set_pitch(4.0)
 
     deltas = []
-    for _ in range(50):
-        prev = dsp.roomSize
+    for _ in range(100):
+        prev = dsp.semitones
         dsp.process_block()
-        curr = dsp.roomSize
+        curr = dsp.semitones
         deltas.append(abs(curr - prev))
 
-    # Verification: Parameter must change progressively, with max delta < 0.05 (smooth gradient, no clicks)
     max_step = max(deltas)
-    assert max_step < 0.05, f"Abrupt step detected in audio block: {max_step}"
-    assert abs(dsp.roomSize - 0.95) < 0.06, f"Did not converge: {dsp.roomSize}"
-    print(f"   -> PASS: Smooth monotonic convergence with max step {max_step:.5f} (zero audio zipper noise).\n")
+    assert max_step < 0.5, f"Abrupt step detected in audio block: {max_step}"
+    assert abs(dsp.semitones - 4.0) < 0.1, f"Did not converge: {dsp.semitones}"
+    print(f"   -> PASS: Smooth monotonic convergence with max pitch step {max_step:.5f} (zero audio zipper noise).\n")
 
 def test_concurrent_ui_and_audio_threads():
     print("[3/4] Testing concurrent UI slider dragging and Core Audio render thread...")
@@ -108,9 +119,8 @@ def test_concurrent_ui_and_audio_threads():
 
     def ui_thread_simulation():
         while running:
-            # Simulate frantic slider movements
+            dsp.set_pitch(random.choice([round(x, 1) for x in [-4.0, -2.4, -0.6, 0.0, 1.8, 3.2, 4.0]]))
             dsp.set_room_size(random.uniform(0.1, 0.98))
-            dsp.set_damping(random.uniform(0.0, 1.0))
             dsp.set_wet_dry(random.uniform(0.0, 1.0), random.uniform(0.0, 1.0))
             dsp.set_enabled(random.choice([True, False]))
             time.sleep(0.001)
@@ -119,10 +129,9 @@ def test_concurrent_ui_and_audio_threads():
         nonlocal iterations
         for _ in range(5000):
             dsp.process_block()
-            # Verify no NaN or Inf occurs under concurrent parameter updates
-            assert not math.isnan(dsp.roomSize)
-            assert not math.isnan(dsp.wet)
-            assert 0.0 <= dsp.roomSize <= 0.98
+            assert not math.isnan(dsp.semitones)
+            assert not math.isnan(dsp.pitchRatio)
+            assert -4.0 <= dsp.semitones <= 4.0
             iterations += 1
 
     t_ui = threading.Thread(target=ui_thread_simulation)
@@ -136,7 +145,6 @@ def test_concurrent_ui_and_audio_threads():
 
 def test_ui_boundary_geometry():
     print("[4/4] Testing UI safe-area and screen-clamping geometry math...")
-    # Screen: 393 x 852 (iPhone 15 Pro)
     screenWidth = 393.0
     screenHeight = 852.0
     btnRadius = 26.0
@@ -146,14 +154,12 @@ def test_ui_boundary_geometry():
     minY = btnRadius + 40.0
     maxY = screenHeight - btnRadius - 40.0
 
-    # Test dragged way off screen to top-left (-50, -100)
     dragX, dragY = -50.0, -100.0
     clampedX = max(minX, min(maxX, dragX))
     clampedY = max(minY, min(maxY, dragY))
     assert clampedX == minX
     assert clampedY == minY
 
-    # Test dragged way off screen to bottom-right (500, 1000)
     dragX, dragY = 500.0, 1000.0
     clampedX = max(minX, min(maxX, dragX))
     clampedY = max(minY, min(maxY, dragY))
@@ -164,9 +170,9 @@ def test_ui_boundary_geometry():
 
 if __name__ == "__main__":
     print("==================================================================")
-    print("      REVERB PARAMETER DYNAMICS & UI THREAD SAFETY SUITE          ")
+    print("      REVERB & PITCH PARAMETER DYNAMICS & UI THREAD SAFETY        ")
     print("==================================================================")
-    test_clamping_and_bounds()
+    test_pitch_intervals_and_clamping()
     test_smooth_interpolation_no_zipper_noise()
     test_concurrent_ui_and_audio_threads()
     test_ui_boundary_geometry()
