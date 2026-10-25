@@ -7,6 +7,6 @@ TWEAK_NAME = SpotifyReverb
 
 SpotifyReverb_FILES = SpotifyReverb.m SpotifyReverbUI.m fishhook.c
 SpotifyReverb_CFLAGS = -fobjc-arc -O3
-SpotifyReverb_FRAMEWORKS = AudioToolbox Foundation UIKit CoreGraphics QuartzCore
+SpotifyReverb_FRAMEWORKS = AudioToolbox Foundation UIKit CoreGraphics QuartzCore MediaPlayer
 
 include $(THEOS_MAKE_PATH)/tweak.mk

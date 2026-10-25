@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -e
 
-echo "Building SpotifyReverb.dylib for arm64 iOS (with UIKit HUD Control)..."
+echo "Building SpotifyReverb.dylib for arm64 iOS..."
 
 SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null || echo "")
 
-FRAMEWORKS="-framework Foundation -framework AudioToolbox -framework UIKit -framework CoreGraphics -framework QuartzCore"
+FRAMEWORKS="-framework Foundation -framework AudioToolbox -framework UIKit -framework CoreGraphics -framework QuartzCore -framework MediaPlayer"
 
 if [ -n "$SDK_PATH" ]; then
     xcrun -sdk iphoneos clang -dynamiclib -arch arm64 -arch arm64e \
