@@ -6,6 +6,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: macos-14
@@ -18,7 +21,19 @@ jobs:
           chmod +x build.sh
           ./build.sh
 
-      - name: Upload Dylib Artifact
+      - name: Publish Direct Raw Dylib (Rolling 'latest' Tag - No Zip)
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "Latest Development Build"
+          body: "Continuous build of SpotifyReverb.dylib (raw uncompressed binary for LiveContainer)."
+          prerelease: false
+          files: SpotifyReverb.dylib
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Dylib Artifact (Fallback)
         uses: actions/upload-artifact@v4
         with:
           name: SpotifyReverb.dylib
